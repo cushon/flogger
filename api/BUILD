@@ -12,6 +12,16 @@ load("//tools:maven.bzl", "pom_file")
 
 SYSTEM_BACKEND_SRCS = glob(["src/main/java/com/google/common/flogger/backend/system/**/*.java"])
 
+STACK_GETTER_IMPL_SRCS = [
+    "src/main/java/com/google/common/flogger/util/StackWalkerStackGetter.java",
+    "src/main/java/com/google/common/flogger/util/JavaLangAccessStackGetter.java",
+]
+
+STACK_GETTER_COMMON_SRCS = [
+    "src/main/java/com/google/common/flogger/util/StackGetter.java",
+    "src/main/java/com/google/common/flogger/util/ThrowableStackGetter.java",
+]
+
 # The core 'frontend' Flogger library.
 java_library(
     name = "api",
@@ -19,7 +29,7 @@ java_library(
     # ObjectiveC transpilation requires all sources to be present.
     srcs = glob(
         ["src/main/java/**/*.java"],
-        exclude = SYSTEM_BACKEND_SRCS,
+        exclude = SYSTEM_BACKEND_SRCS + STACK_GETTER_IMPL_SRCS + STACK_GETTER_COMMON_SRCS,
     ) + select({
         "//conditions:default": [],
     }),
@@ -28,9 +38,56 @@ java_library(
     visibility = ["//visibility:public"],
     deps = [
         ":platform_provider",
+        ":stack_getter_common",
+        ":stack_getter_impl",
         "@google_bazel_common//third_party/java/checker_framework_annotations",
         "@google_bazel_common//third_party/java/error_prone:annotations",
     ],
+)
+
+java_import(
+    name = "stack_getter_impl",
+    jars = ["stack_getter_impl.jar"],
+    deps = [":stack_getter_common"],
+)
+
+genrule(
+    name = "gen_stack_getter_impl",
+    srcs = STACK_GETTER_IMPL_SRCS + [
+        ":stack_getter_common",
+    ],
+    outs = ["stack_getter_impl.jar"],
+    cmd = """
+TMPDIR=$$(mktemp -d)
+OUTPUT=$$PWD/$@
+STACK_GETTER_COMMON=$(location :stack_getter_common)
+if [[ -z $${JDK8+x} ]]; then
+  JAVABASE8=$$PWD/$(JAVABASE)
+else
+  JAVABASE8=$$JDK8
+fi
+JAVABASE11=$$PWD/$(JAVABASE)
+JAR=$$PWD/$(JAVABASE)/bin/jar
+if ! $$JAVABASE8/bin/javac -d $$TMPDIR -source 1.6 -target 1.6 -cp $${STACK_GETTER_COMMON} -implicit:none \
+    $(location src/main/java/com/google/common/flogger/util/JavaLangAccessStackGetter.java) ; then
+  echo "WARNING: Unable to compile JavaLangAccessStackGetter. Below Java 9 log site and caller determination will fall back to using Throwable."
+fi
+if ! $$JAVABASE11/bin/javac -d $$TMPDIR -source 1.8 -target 1.8 -cp $${STACK_GETTER_COMMON} -implicit:none \
+    $(location src/main/java/com/google/common/flogger/util/StackWalkerStackGetter.java) ; then
+  echo "WARNING: Unable to compile StackWalkerStackGetter. Above Java 8 log site and caller determination will fall back to using Throwable."
+fi
+cd $$TMPDIR && $$JAR cf $$OUTPUT com/google/common/flogger/util/*StackGetter*.class
+    """,
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
+    tools = ["@bazel_tools//tools/jdk:current_java_runtime"],
+)
+
+java_library(
+    name = "stack_getter_common",
+    srcs = STACK_GETTER_COMMON_SRCS + [
+        "src/main/java/com/google/common/flogger/util/Checks.java",
+    ],
+    javacopts = ["-source 8 -target 8"],
 )
 
 pom_file(
@@ -52,7 +109,7 @@ javadoc_library(
     name = "api_javadoc",
     srcs = glob(
         ["src/main/java/**/*.java"],
-        exclude = SYSTEM_BACKEND_SRCS,
+        exclude = SYSTEM_BACKEND_SRCS + STACK_GETTER_IMPL_SRCS,
     ),
     root_packages = ["com.google.common.flogger"],
     deps = [":api"],
@@ -158,7 +215,10 @@ filegroup(
 filegroup(
     name = "javadoc_sources",
     testonly = 1,
-    srcs = glob(["src/main/java/**"]) + TESTING_SRCS,
+    srcs = glob(
+        ["src/main/java/**"],
+        exclude = STACK_GETTER_IMPL_SRCS,
+    ) + TESTING_SRCS,
     visibility = ["//visibility:public"],
 )
 
@@ -174,6 +234,8 @@ gen_java_tests(
     ),
     deps = [
         ":api",
+        ":stack_getter_common",
+        ":stack_getter_impl",
         ":system_backend",
         ":testing",
         "@google_bazel_common//third_party/java/checker_framework_annotations",
